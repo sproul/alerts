@@ -54,3 +54,5 @@ EOF
 )
 
 echo "$environment_instructions"
+exit
+bash -x $dp/git/alerts/init.sh

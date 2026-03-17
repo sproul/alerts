@@ -13,6 +13,7 @@ IMPORTANT_SENDERS: tuple[str, ...] = (
     "Ava Sproul",
     "Bill Riley",
     "Brace Sproul",
+    "Christian Appleby",
     "Constance Porteous",
     "Craig Carlino",
     "Daisy Li",
@@ -38,18 +39,20 @@ IMPORTANT_SENDERS: tuple[str, ...] = (
     "Nate Reynolds",
     "Robert Jones",
     "Stuart Rickard",
+    
+"brace@langchain.dev"
 )
 
 INSIGNIFICANCE_PATTERNS: tuple[str, ...] = (
     "https://sameday.costco.com",
     "your Costco Shopper",
-    "YOUR ACCOUNT HELP CENTER HELP FORUM",
     "Your Costco order",
 )
 
 SIGNIFICANCE_PATTERNS: tuple[str, ...] = (
     "despain",
     "langchain",
+    "You have a new direct message in", # slack
     "New text message from ",
 )
 

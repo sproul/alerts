@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
 import sys
 import warnings
+from email.header import decode_header
+from email.utils import parseaddr
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable, Pattern
 
 from urllib3.exceptions import NotOpenSSLWarning
 
@@ -70,7 +73,15 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 CREDENTIALS_FILE = Path.home() / ".gmail_credentials.json"
 TOKEN_FILE = Path.home() / ".gmail_token.json"
-SEEN_FILE = Path.home() / ".gmail_important_seen.json"
+SEEN_FILE_PATH = Path.home() / ".gmail_important_seen.json"
+
+DEBUG_MODE = False
+IGNORE_SEEN_MODE = False
+
+
+def debug_log(message: str) -> None:
+    if DEBUG_MODE:
+        print(f"OK DEBUG {message}")
 
 
 def remove_invalid_token_file():
@@ -84,16 +95,73 @@ def is_invalid_grant_error(error: Exception) -> bool:
     return "invalid_grant" in text or "Invalid Credentials" in text
 
 
-def load_seen_message_ids():
-    if SEEN_FILE.exists():
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
+def load_seen_message_ids() -> set[str]:
+    if IGNORE_SEEN_MODE:
+        debug_log("Ignoring seen message cache due to CLI option")
+        return set()
+    if not SEEN_FILE_PATH.exists():
+        debug_log(f"Seen file {SEEN_FILE_PATH} does not exist")
+        return set()
+    with open(SEEN_FILE_PATH, "r", encoding="utf-8") as handle:
+        cached_ids = set(json.load(handle))
+    debug_log(f"Loaded {len(cached_ids)} seen message ids from {SEEN_FILE_PATH}")
+    return cached_ids
 
 
-def save_seen_message_ids(seen_ids):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen_ids), f)
+def save_seen_message_ids(seen_ids: set[str]) -> None:
+    if IGNORE_SEEN_MODE:
+        debug_log("Not persisting seen message ids due to CLI ignore option")
+        return
+    with open(SEEN_FILE_PATH, "w", encoding="utf-8") as handle:
+        json.dump(sorted(seen_ids), handle)
+    debug_log(f"Persisted {len(seen_ids)} seen message ids to {SEEN_FILE_PATH}")
+
+
+def collect_pattern_matches(
+    patterns: Iterable[Pattern[str]],
+    field_values: dict[str, str],
+) -> list[tuple[Pattern[str], str, int]]:
+    matches: list[tuple[Pattern[str], str, int]] = []
+    for pattern in patterns:
+        for field_name, value in field_values.items():
+            if not value:
+                continue
+            match = pattern.search(value)
+            if match:
+                matches.append((pattern, field_name, match.start()))
+                break
+    return matches
+
+
+def is_google_voice_notification(from_header: str, subject: str) -> bool:
+    header_lower = (from_header or "").lower()
+    subject_lower = (subject or "").lower()
+    return "txt.voice.google.com" in header_lower or subject_lower.startswith("new text message from ")
+
+
+def should_override_insignificance_for_google_voice(
+    insignificance_matches: list[tuple[Pattern[str], str, int]],
+    from_header: str,
+    subject: str,
+    snippet: str,
+) -> bool:
+    if not insignificance_matches:
+        return False
+    if not is_google_voice_notification(from_header, subject):
+        return False
+    snippet_value = snippet or ""
+    if not snippet_value:
+        return False
+    for pattern, field_name, match_start in insignificance_matches:
+        if field_name != "snippet":
+            continue
+        if "your account help center help forum" not in pattern.pattern.lower():
+            continue
+        prefix = snippet_value[:match_start].strip()
+        prefix_without_brand = prefix.replace("Google Voice", "").strip()
+        if any(char.isalnum() for char in prefix_without_brand):
+            return True
+    return False
 
 
 def get_gmail_service():
@@ -154,16 +222,42 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+def decode_mime_header(raw_value: str) -> str:
+    if not raw_value:
+        return ""
+    try:
+        fragments = decode_header(raw_value)
+    except Exception:
+        return raw_value
+    decoded_parts: list[str] = []
+    for fragment, encoding in fragments:
+        if isinstance(fragment, bytes):
+            codec = encoding or "utf-8"
+            try:
+                decoded_parts.append(fragment.decode(codec, errors="replace"))
+            except Exception:
+                decoded_parts.append(fragment.decode("utf-8", errors="replace"))
+        else:
+            decoded_parts.append(fragment)
+    return "".join(decoded_parts)
+
+
 def extract_sender_name(from_header):
-    if "<" in from_header:
-        return from_header.split("<")[0].strip().strip('"')
-    return from_header.strip()
+    decoded = decode_mime_header(from_header)
+    name, email_address = parseaddr(decoded)
+    if name:
+        return name.strip().strip('"')
+    if "<" in decoded:
+        return decoded.split("<")[0].strip().strip('"')
+    if email_address:
+        return email_address
+    return decoded.strip()
 
 
 def extract_subject(headers):
     for header in headers:
         if header["name"].lower() == "subject":
-            return header["value"]
+            return decode_mime_header(header["value"])
     return "(no subject)"
 
 
@@ -184,13 +278,26 @@ def is_important_sender(from_header):
 
 
 def is_suppressed_message(from_header, subject, snippet):
-    fields = [from_header or "", subject or "", snippet or ""]
-    return match_any_regex(INSIGNIFICANCE_REGEXES, fields)
+    field_map = {
+        "from": from_header or "",
+        "subject": subject or "",
+        "snippet": snippet or "",
+    }
+    matches = collect_pattern_matches(INSIGNIFICANCE_REGEXES, field_map)
+    if matches and should_override_insignificance_for_google_voice(matches, from_header, subject, snippet):
+        debug_log("Google Voice insignificance override applied; not suppressing message")
+        return False
+    return bool(matches)
 
 
 def is_significant_message(from_header, subject, snippet):
-    fields = [from_header or "", subject or "", snippet or ""]
-    return match_any_regex(SIGNIFICANCE_REGEXES, fields)
+    field_map = {
+        "from": from_header or "",
+        "subject": subject or "",
+        "snippet": snippet or "",
+    }
+    matches = collect_pattern_matches(SIGNIFICANCE_REGEXES, field_map)
+    return bool(matches)
 
 
 def send_alert(sender_name, subject, message_snippet):
@@ -232,6 +339,7 @@ def fetch_message_metadata(service, message_id):
 def process_single_message(service, message_info, seen_ids, new_seen_ids):
     msg_id = message_info["id"]
     if msg_id in seen_ids:
+        debug_log(f"Skipping message {msg_id} (already seen)")
         return 0
 
     message = fetch_message_metadata(service, msg_id)
@@ -245,8 +353,19 @@ def process_single_message(service, message_info, seen_ids, new_seen_ids):
     subject = extract_subject(headers)
     snippet = message.get("snippet", "")
 
+    if DEBUG_MODE:
+        debug_log(
+            "Processing message {}\n  From: {}\n  Subject: {}\n  Snippet: {}".format(
+                msg_id,
+                from_header,
+                subject,
+                snippet,
+            )
+        )
+
     if is_significant_message(from_header, subject, snippet):
         if is_suppressed_message(from_header, subject, snippet):
+            debug_log(f"Message {msg_id} matches significance and insignificance; suppressed")
             new_seen_ids.add(msg_id)
             return 0
         sender_name = extract_sender_name(from_header) or "Unknown sender"
@@ -265,6 +384,7 @@ def process_single_message(service, message_info, seen_ids, new_seen_ids):
     is_important, matched_name = is_important_sender(from_header)
     if is_important:
         if is_suppressed_message(from_header, subject, snippet):
+            debug_log(f"Message {msg_id} from {matched_name} suppressed by insignificance patterns")
             new_seen_ids.add(msg_id)
             return 0
         if send_alert(matched_name, subject, snippet):
@@ -300,7 +420,72 @@ def check_for_important_mail():
     return call_gmail_with_reauth(process_unread_messages)
 
 
+def parse_cli_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Check Gmail for important messages")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug logging",
+    )
+    parser.add_argument(
+        "--ignore-seen",
+        action="store_true",
+        help="Ignore cached seen message IDs for this run",
+    )
+    parser.add_argument(
+        "--clear-seen",
+        action="store_true",
+        help="Delete the seen message cache before processing",
+    )
+    parser.add_argument(
+        "--seen-file",
+        type=str,
+        default=str(SEEN_FILE_PATH),
+        help="Override path to the seen message cache file",
+    )
+    return parser.parse_args()
+
+
+def configure_runtime_from_args(args: argparse.Namespace) -> None:
+    global DEBUG_MODE
+    global IGNORE_SEEN_MODE
+    global SEEN_FILE_PATH
+
+    if args.debug:
+        DEBUG_MODE = True
+        debug_log("Debug logging enabled")
+
+    if args.ignore_seen:
+        IGNORE_SEEN_MODE = True
+        debug_log("Ignoring seen messages for this execution")
+
+    if args.seen_file:
+        SEEN_FILE_PATH = Path(args.seen_file)
+        debug_log(f"Using seen file at {SEEN_FILE_PATH}")
+
+    if args.clear_seen:
+        if SEEN_FILE_PATH.exists():
+            SEEN_FILE_PATH.unlink()
+            print(f"OK Cleared seen cache at {SEEN_FILE_PATH}")
+        else:
+            print(f"OK Seen cache {SEEN_FILE_PATH} already absent")
+
+    if DEBUG_MODE:
+        debug_log("Important senders configured:")
+        for sender in IMPORTANT_SENDERS:
+            debug_log(f"  sender: {sender}")
+        debug_log("Significance patterns configured:")
+        for pattern in SIGNIFICANCE_REGEXES:
+            debug_log(f"  significance regex: {pattern.pattern}")
+        debug_log("Insignificance patterns configured:")
+        for pattern in INSIGNIFICANCE_REGEXES:
+            debug_log(f"  insignificance regex: {pattern.pattern}")
+
+
 def main():
+    args = parse_cli_arguments()
+    configure_runtime_from_args(args)
+
     try:
         alerts = check_for_important_mail()
         if alerts > 0:
