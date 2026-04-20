@@ -37,6 +37,7 @@ IMPORTANT_SENDERS: tuple[str, ...] = (
     "Melanie Capasso",
     "Michelle Pierce",
     "Nate Reynolds",
+    "Rick Claypoole",
     "Robert Jones",
     "Stuart Rickard",
     
