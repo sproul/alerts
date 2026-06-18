@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-import base64
 import json
-import re
 import sys
 import warnings
-from datetime import datetime
 from email.header import decode_header
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Pattern
+from typing import Callable, Iterable, Pattern
 
 from urllib3.exceptions import NotOpenSSLWarning
 
@@ -423,117 +420,6 @@ def check_for_important_mail():
     return call_gmail_with_reauth(process_unread_messages)
 
 
-def build_attachment_query(sender: str) -> str:
-    sender_value = sender.strip()
-    already_quoted = sender_value.startswith('"') and sender_value.endswith('"')
-    if " " in sender_value and not already_quoted:
-        sender_value = f'"{sender_value}"'
-    return f"from:{sender_value} has:attachment"
-
-
-def fetch_all_message_ids(service, query: str) -> list[str]:
-    message_ids: list[str] = []
-    page_token = None
-    while True:
-        response = service.users().messages().list(
-            userId="me", q=query, maxResults=100, pageToken=page_token
-        ).execute()
-        message_ids.extend(message["id"] for message in response.get("messages", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-    return message_ids
-
-
-def format_message_date(message: dict) -> str:
-    internal_date_ms = message.get("internalDate")
-    if not internal_date_ms:
-        return "0000-00-00"
-    timestamp_seconds = int(internal_date_ms) / 1000
-    return datetime.fromtimestamp(timestamp_seconds).strftime("%Y-%m-%d")
-
-
-def iter_attachment_parts(payload: dict) -> Iterator[tuple[str, str]]:
-    for part in payload.get("parts", []):
-        yield from iter_attachment_parts(part)
-    filename = payload.get("filename")
-    body = payload.get("body", {})
-    attachment_id = body.get("attachmentId")
-    if filename and attachment_id:
-        yield filename, attachment_id
-
-
-def sanitize_filename(filename: str) -> str:
-    cleaned = re.sub(r"[/\\\x00]", "_", filename).strip()
-    return cleaned or "attachment"
-
-
-def build_unique_attachment_path(output_dir: Path, date_prefix: str, filename: str) -> Path:
-    safe_name = sanitize_filename(filename)
-    candidate = output_dir / f"{date_prefix}_{safe_name}"
-    counter = 2
-    while candidate.exists():
-        candidate = output_dir / f"{date_prefix}_{candidate.stem}__{counter}{candidate.suffix}"
-        counter += 1
-    return candidate
-
-
-def download_attachment_data(service, message_id: str, attachment_id: str) -> bytes:
-    attachment = service.users().messages().attachments().get(
-        userId="me", messageId=message_id, id=attachment_id
-    ).execute()
-    return base64.urlsafe_b64decode(attachment["data"])
-
-
-def save_message_attachments(service, message_id: str, output_dir: Path) -> int:
-    message = service.users().messages().get(
-        userId="me", id=message_id, format="full"
-    ).execute()
-    date_prefix = format_message_date(message)
-    saved_count = 0
-    for filename, attachment_id in iter_attachment_parts(message.get("payload", {})):
-        data = download_attachment_data(service, message_id, attachment_id)
-        target_path = build_unique_attachment_path(output_dir, date_prefix, filename)
-        target_path.write_bytes(data)
-        print(f"OK Saved {target_path}")
-        saved_count += 1
-    return saved_count
-
-
-def gather_attachments_from_sender(service, sender: str, output_dir: Path) -> int:
-    query = build_attachment_query(sender)
-    debug_log(f"Gathering attachments with query: {query}")
-    message_ids = fetch_all_message_ids(service, query)
-    print(f"OK Found {len(message_ids)} message(s) with attachments from {sender}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    total_saved = 0
-    for message_id in message_ids:
-        total_saved += save_message_attachments(service, message_id, output_dir)
-    return total_saved
-
-
-def default_attachments_dir(sender: str) -> Path:
-    safe_sender = re.sub(r"[^A-Za-z0-9._-]+", "_", sender.strip()).strip("_") or "sender"
-    return Path.cwd() / f"gmail_attachments_{safe_sender}"
-
-
-def run_attachment_gathering(args: argparse.Namespace) -> int:
-    if args.attachments_dir:
-        output_dir = Path(args.attachments_dir)
-    else:
-        output_dir = default_attachments_dir(args.gather_attachments_from)
-    total_saved = call_gmail_with_reauth(
-        lambda service: gather_attachments_from_sender(
-            service, args.gather_attachments_from, output_dir
-        )
-    )
-    if total_saved > 0:
-        print(f"OK Saved {total_saved} attachment(s) to {output_dir}")
-    else:
-        print(f"OK No attachments found from {args.gather_attachments_from}")
-    return total_saved
-
-
 def parse_cli_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check Gmail for important messages")
     parser.add_argument(
@@ -556,21 +442,6 @@ def parse_cli_arguments() -> argparse.Namespace:
         type=str,
         default=str(SEEN_FILE_PATH),
         help="Override path to the seen message cache file",
-    )
-    parser.add_argument(
-        "--gather_attachments_from",
-        type=str,
-        default=None,
-        metavar="USER",
-        help="Download every attachment ever emailed from USER (name or address), "
-        "saving each with a YYYY-MM-DD date prefix; skips the normal unread-mail check",
-    )
-    parser.add_argument(
-        "--attachments-dir",
-        type=str,
-        default=None,
-        help="Destination directory for --gather_attachments_from "
-        "(default: ./gmail_attachments_<sender> in the current directory)",
     )
     return parser.parse_args()
 
@@ -614,14 +485,6 @@ def configure_runtime_from_args(args: argparse.Namespace) -> None:
 def main():
     args = parse_cli_arguments()
     configure_runtime_from_args(args)
-
-    if args.gather_attachments_from:
-        try:
-            run_attachment_gathering(args)
-        except Exception as e:
-            print(f"FAIL {e}", file=sys.stderr)
-            sys.exit(1)
-        return
 
     try:
         alerts = check_for_important_mail()

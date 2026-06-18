@@ -8,6 +8,9 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, Pattern, Sequence
 
+# for a goog filter:
+# @despaintax.com OR @gmail.com OR @me.com OR @sienacapital.com OR @optimafi.com OR stuart@bau-dev.com OR grantsthompson@yahoo.com OR cporteous@comcast.net OR @txt.voice.google.com OR @heartofsmc.org @langchain.dev
+
 IMPORTANT_SENDERS: tuple[str, ...] = (
     "Armando Sanchez",
     "Ava Sproul",
