@@ -1,0 +1,6 @@
+#!/bin/bash -x
+set -o pipefail
+cd $HOME/alerts/all
+rmg $*
+exit
+$dp/git/alerts/alerts.rmg errors seen in /tmp/cron.m4.minutely.out
