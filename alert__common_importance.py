@@ -58,6 +58,7 @@ SIGNIFICANCE_PATTERNS: tuple[str, ...] = (
     "langchain",
     "You have a new direct message in", # slack
     "New text message from ",
+    "marketplace", # facebook marketplace message notification emails
 )
 
 
