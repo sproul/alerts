@@ -17,6 +17,8 @@ IMPORTANT_SENDERS: tuple[str, ...] = (
     "Bill Riley",
     "Brace Sproul",
     "Christian Appleby",
+    "CAppleby",
+    "CAppleby@sienacapital.net",
     "Constance Porteous",
     "Craig Carlino",
     "Daisy Li",
