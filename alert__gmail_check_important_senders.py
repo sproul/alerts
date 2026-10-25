@@ -300,9 +300,12 @@ def is_significant_message(from_header, subject, snippet):
     return bool(matches)
 
 
-def send_alert(sender_name, subject, message_snippet):
+def send_alert(msg_id: str, sender_name: str, subject: str, message_snippet: str) -> bool:
+    # alert.sh de-duplicates by a checksum of (summary, body); naming the
+    # Gmail message id makes that exactly one alert per message, so two
+    # identical texts (e.g., "ok" twice) still raise two alerts.
     summary = f"mail from {sender_name}: \"{subject}\""
-    body = f"From: {sender_name}\nSubject: {subject}\n\n{message_snippet}"
+    body = f"From: {sender_name}\nSubject: {subject}\nGmail-Message-Id: {msg_id}\n\n{message_snippet}"
     return dispatch_alert(summary, body)
 
 
@@ -369,7 +372,7 @@ def process_single_message(service, message_info, seen_ids, new_seen_ids):
             new_seen_ids.add(msg_id)
             return 0
         sender_name = extract_sender_name(from_header) or "Unknown sender"
-        if send_alert(sender_name, subject, snippet):
+        if send_alert(msg_id, sender_name, subject, snippet):
             print(f"OK Alert sent for mail matching significance pattern from {sender_name}: {subject}")
         else:
             print(
@@ -387,7 +390,7 @@ def process_single_message(service, message_info, seen_ids, new_seen_ids):
             debug_log(f"Message {msg_id} from {matched_name} suppressed by insignificance patterns")
             new_seen_ids.add(msg_id)
             return 0
-        if send_alert(matched_name, subject, snippet):
+        if send_alert(msg_id, matched_name, subject, snippet):
             print(f"OK Alert sent for mail from {matched_name}: {subject}")
         else:
             print(f"FAIL Could not send alert for mail from {matched_name}", file=sys.stderr)
