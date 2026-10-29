@@ -12,7 +12,13 @@ usage: python3 test_alert__gmail_check_important_senders.py
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import io
+import socket
+import sys
 import unittest
+from typing import Callable
 from unittest import mock
 
 import alert__gmail_check_important_senders as gmail_check
@@ -67,6 +73,70 @@ class OneAlertPerGmailMessageTest(unittest.TestCase):
     def test_alert_body_names_the_gmail_message_id(self) -> None:
         ((_summary, body),) = dispatch_alerts_for_message_ids(["1a15bf20285cc366"])
         self.assertIn("1a15bf20285cc366", body)
+
+
+def raise_wrapped_dns_failure() -> None:
+    """Mimic the google-auth/requests/urllib3 layering: the socket.gaierror
+    is buried several links down the __cause__/__context__ chain."""
+    try:
+        try:
+            raise socket.gaierror(8, "nodename nor servname provided, or not known")
+        except socket.gaierror as dns_error:
+            raise RuntimeError("Max retries exceeded with url: /token") from dns_error
+    except RuntimeError:
+        raise ValueError("HTTPSConnectionPool(host='oauth2.googleapis.com', port=443)")
+
+
+def capture_exception(operation: Callable[[], None]) -> BaseException:
+    try:
+        operation()
+    except BaseException as error:  # noqa: BLE001 - the test inspects whatever was raised
+        return error
+    raise AssertionError("operation did not raise")
+
+
+def run_main_expecting_exit_code(error: BaseException) -> tuple[int, str, str]:
+    """Run main() with check_for_important_mail raising error; return
+    (exit code, stdout, stderr)."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    exit_code = 0
+    with mock.patch.object(gmail_check, "check_for_important_mail", side_effect=error), \
+            mock.patch.object(sys, "argv", ["alert__gmail_check_important_senders.py"]), \
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            gmail_check.main()
+        except SystemExit as exit_request:
+            exit_code = int(exit_request.code or 0)
+    return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+class NetworkUnreachableTest(unittest.TestCase):
+    def test_dns_failure_buried_in_exception_chain_counts_as_offline(self) -> None:
+        self.assertTrue(gmail_check.is_network_unreachable_error(capture_exception(raise_wrapped_dns_failure)))
+
+    def test_network_unreachable_errno_counts_as_offline(self) -> None:
+        self.assertTrue(gmail_check.is_network_unreachable_error(OSError(errno.ENETUNREACH, "Network is unreachable")))
+
+    def test_unrelated_errors_do_not_count_as_offline(self) -> None:
+        self.assertFalse(gmail_check.is_network_unreachable_error(ValueError("invalid_grant")))
+        self.assertFalse(gmail_check.is_network_unreachable_error(OSError(errno.ENOENT, "No such file")))
+
+    def test_real_google_auth_dns_failure_counts_as_offline(self) -> None:
+        from google.auth.transport.requests import Request
+
+        error = capture_exception(lambda: Request()("https://nonexistent-host.invalid/token", method="POST"))
+        self.assertTrue(gmail_check.is_network_unreachable_error(error))
+
+    def test_main_skips_quietly_when_offline(self) -> None:
+        exit_code, stdout, stderr = run_main_expecting_exit_code(capture_exception(raise_wrapped_dns_failure))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertTrue(stdout.startswith("OK "), stdout)
+
+    def test_main_still_fails_loudly_on_other_errors(self) -> None:
+        exit_code, _stdout, stderr = run_main_expecting_exit_code(ValueError("boom"))
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(stderr.startswith("FAIL "), stderr)
 
 
 if __name__ == "__main__":

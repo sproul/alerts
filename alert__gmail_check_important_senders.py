@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import errno
 import json
+import socket
 import sys
 import warnings
 from email.header import decode_header
@@ -88,6 +90,32 @@ def remove_invalid_token_file():
     if TOKEN_FILE.exists():
         TOKEN_FILE.unlink()
         print("OK Removed invalid Gmail token; reauthorization required", file=sys.stderr)
+
+
+NETWORK_UNREACHABLE_ERRNOS = {errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH}
+
+
+def iterate_exception_chain(error: BaseException) -> Iterable[BaseException]:
+    """Yield error and every exception it wraps via __cause__/__context__.
+    google-auth, requests, urllib3 and httplib2 each re-wrap the original
+    socket failure, so the root cause is usually several links down."""
+    seen_ids: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen_ids:
+        seen_ids.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def is_network_unreachable_error(error: BaseException) -> bool:
+    """True when the failure is just this host being offline (e.g., wifi
+    down): a DNS lookup failure or a network/host-unreachable socket error."""
+    for link in iterate_exception_chain(error):
+        if isinstance(link, socket.gaierror):
+            return True
+        if isinstance(link, OSError) and link.errno in NETWORK_UNREACHABLE_ERRNOS:
+            return True
+    return False
 
 
 def is_invalid_grant_error(error: Exception) -> bool:
@@ -496,6 +524,9 @@ def main():
         else:
             print("OK No new important mail")
     except Exception as e:
+        if is_network_unreachable_error(e):
+            print(f"OK Network unreachable, skipping Gmail check: {e}")
+            return
         print(f"FAIL {e}", file=sys.stderr)
         sys.exit(1)
 
